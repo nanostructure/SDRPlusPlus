@@ -140,13 +140,12 @@ public:
 
         // List samplerates
         samplerates.clear();
-        auto srList = dev->get_rx_rates(chanId);
-        for (const auto& l : srList) {
-            double step = (l.step() == 0.0) ? 100e3 : l.step();
-            for (double f = l.start(); f <= l.stop(); f += step) {
-                samplerates.define(f, utils::formatFreq(f), f);
-            }
+        // Define valid samplerates
+        samplerates.define(512000, utils::formatFreq(512000), 512000);
+        for (int sr = 1000000; sr <= 61440000; sr += 1000000) {
+            samplerates.define(sr, utils::formatFreq(sr), sr);
         }
+        samplerates.define(61440000, utils::formatFreq(61440000.0), 61440000.0);
 
         // List antennas
         antennas.clear();
@@ -177,6 +176,15 @@ public:
             name[0] = std::toupper(name[0]);
             clockSources.define(s, name, s);
         }
+
+        // Get time sources
+        timeSources.clear();
+        auto tSources = dev->get_time_sources(0);
+        for (const auto& s : tSources) {
+            std::string name = s;
+            name[0] = std::toupper(name[0]);
+            timeSources.define(s, name, s);
+        }
         
         // Load settings
         srId = 0;
@@ -202,6 +210,10 @@ public:
             if (cconf.contains("clock")) {
                 std::string clk = cconf["clock"];
                 if (clockSources.keyExists(clk)) { csId = clockSources.keyId(clk); }
+            }
+            if (cconf.contains("time")) {
+                std::string tm = cconf["time"];
+                if (timeSources.keyExists(tm)) { tmId = timeSources.keyId(tm); }
             }
             if (cconf.contains("gain")) {
                 gain = cconf["gain"];
@@ -270,13 +282,14 @@ private:
         _this->dev->set_rx_gain(_this->gain, _this->chanId);
         _this->dev->set_rx_freq(_this->freq, _this->chanId);
         _this->dev->set_clock_source(_this->clockSources.key(_this->csId));
+        _this->dev->set_time_source(_this->timeSources.key(_this->tmId));
         _this->setBandwidth(_this->bandwidths[_this->bwId]);
         
         uhd::stream_args_t sargs;
         sargs.channels.clear();
         sargs.channels.push_back(_this->chanId);
         sargs.cpu_format = "fc32";
-        sargs.otw_format = "sc16";
+        sargs.otw_format = "sc12";
         _this->streamer = _this->dev->get_rx_stream(sargs);
         _this->streamer->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
         
@@ -409,6 +422,21 @@ private:
             }
         }
 
+        if (_this->timeSources.size() > 1) {
+            SmGui::LeftLabel("Time");
+            SmGui::FillWidth();
+            if (SmGui::Combo(CONCAT("##_usrp_tm_sel_", _this->name), &_this->tmId, _this->timeSources.txt)) {
+                if (_this->running) {
+                    _this->dev->set_time_source(_this->timeSources.key(_this->tmId));
+                }
+                if (!_this->selectedSer.empty()) {
+                    config.acquire();
+                    config.conf["devices"][_this->selectedSer]["channels"][_this->selectedChan]["time"] = _this->timeSources.key(_this->tmId);
+                    config.release(true);
+                }
+            }
+        }
+
         SmGui::LeftLabel("Gain");
         SmGui::FillWidth();
         if (SmGui::SliderFloatWithSteps(CONCAT("##_usrp_gain_", _this->name), &_this->gain, _this->gainRange.start(), _this->gainRange.stop(), _this->gainRange.step(), SmGui::FMT_STR_FLOAT_DB_ONE_DECIMAL)) {
@@ -468,6 +496,7 @@ private:
     int antId = 0;
     int bwId = 0;
     int csId = 0;
+    int tmId = 0;
     std::string selectedSer = "";
     std::string selectedChan = "";
     float gain = 0.0f;
@@ -478,6 +507,7 @@ private:
     OptionList<std::string, std::string> antennas;
     OptionList<int, double> bandwidths;
     OptionList<std::string, std::string> clockSources;
+    OptionList<std::string, std::string> timeSources;
     uhd::range_t gainRange;
 
     uhd::usrp::multi_usrp::sptr dev;
