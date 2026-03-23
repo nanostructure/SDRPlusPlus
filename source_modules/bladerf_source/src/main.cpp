@@ -11,6 +11,7 @@
 #include <gui/smgui.h>
 #include <algorithm>
 #include <utils/optionlist.h>
+#include <utils/freq_formatting.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -150,6 +151,31 @@ public:
             selectedBladeType = BLADERF_TYPE_UNKNOWN;
         }
 
+        // Get version info
+        struct bladerf_version libVersion;
+        struct bladerf_version fpgaVersion;
+        struct bladerf_version fwVersion;
+        bladerf_version(&libVersion);
+        bladerf_fpga_version(openDev, &fpgaVersion);
+        bladerf_fw_version(openDev, &fwVersion);
+        flog::info("BladeRFSourceModule libVersion {0}.{1}.{2}", libVersion.major, libVersion.minor, libVersion.patch);
+        flog::info("BladeRFSourceModule fpgaVersion {0}.{1}.{2}", fpgaVersion.major, fpgaVersion.minor, fpgaVersion.patch);
+        flog::info("BladeRFSourceModule fwVersion {0}.{1}.{2}", fwVersion.major, fwVersion.minor, fwVersion.patch);
+        uint64_t libVersionBits = libVersion.major << 16 | libVersion.minor << 8 | libVersion.patch;
+        uint64_t fpgaVersionBits = fpgaVersion.major << 16 | fpgaVersion.minor << 8 | fpgaVersion.patch;
+        uint64_t fwVersionBits = fwVersion.major << 16 | fwVersion.minor << 8 | fwVersion.patch;
+
+        // Gather info about oversample and 8 bitmode support
+        // https://github.com/Nuand/bladeRF/releases/tag/2023.02
+        if (libVersionBits >= 0x020500 && fpgaVersionBits >= 0x000F00 && fwVersionBits >= 0x020400) {
+            selectedSupportOversample = true;
+            selectedSupport8Bitmode = true;
+        }
+        // https://github.com/Nuand/bladeRF/releases/tag/2025.10
+        if (libVersionBits >= 0x020600 && fpgaVersionBits >= 0x001000 && fwVersionBits >= 0x020600) {
+            selectedSupportQ11Packed = true;
+        }
+
         // Gather info about the BladeRF's ranges
         channelCount = bladerf_get_channel_count(openDev, BLADERF_RX);
 
@@ -180,31 +206,49 @@ public:
         // Generate sampleRate and Bandwidth lists
         sampleRates.clear();
         sampleRatesTxt = "";
-        sampleRates.push_back(srRange->min);
-        sampleRatesTxt += getBandwdithScaled(srRange->min);
-        sampleRatesTxt += '\0';
-        for (int i = 2000000; i < srRange->max; i += 2000000) {
-            sampleRates.push_back(i);
-            sampleRatesTxt += getBandwdithScaled(i);
-            sampleRatesTxt += '\0';
+        addSampleRate(srRange->min);
+        addSampleRate(1000000);
+        addSampleRate(2000000);
+        addSampleRate(3000000);
+        addSampleRate(4000000);
+        addSampleRate(5000000);
+        addSampleRate(6000000);
+        addSampleRate(8000000);
+        addSampleRate(10000000);
+        addSampleRate(12000000);
+        addSampleRate(14000000);
+        addSampleRate(16000000);
+        addSampleRate(18000000);
+        addSampleRate(20000000);
+        addSampleRate(30000000);
+        addSampleRate(40000000);
+        addSampleRate(50000000);
+        addSampleRate(56000000);
+        addSampleRate(60000000);
+        addSampleRate(61400000);
+        if (selectedSupportOversample) {
+            addSampleRate(70000000);
+            addSampleRate(80000000);
+            addSampleRate(90000000);
+            addSampleRate(100000000);
+            addSampleRate(110000000);
+            addSampleRate(120000000);
+            addSampleRate(122880000);
         }
-        sampleRates.push_back(srRange->max);
-        sampleRatesTxt += getBandwdithScaled(srRange->max);
-        sampleRatesTxt += '\0';
 
         // Generate bandwidth list
         bandwidths.clear();
         bandwidthsTxt = "";
         bandwidths.push_back(bwRange->min);
-        bandwidthsTxt += getBandwdithScaled(bwRange->min);
+        bandwidthsTxt += utils::formatFreq(bwRange->min);
         bandwidthsTxt += '\0';
         for (int i = 2000000; i < bwRange->max; i += 2000000) {
             bandwidths.push_back(i);
-            bandwidthsTxt += getBandwdithScaled(i);
+            bandwidthsTxt += utils::formatFreq(i);
             bandwidthsTxt += '\0';
         }
         bandwidths.push_back(bwRange->max);
-        bandwidthsTxt += getBandwdithScaled(bwRange->max);
+        bandwidthsTxt += utils::formatFreq(bwRange->max);
         bandwidthsTxt += '\0';
         bandwidthsTxt += "Auto";
         bandwidthsTxt += '\0';
@@ -261,6 +305,7 @@ public:
             srId = 0;
             sampleRate = sampleRates[0];
         }
+        oversample = selectedSupportOversample && sampleRate >= 61400000;
 
         // Load bandwidth
         if (config.conf["devices"][selectedSerial].contains("bandwidth")) {
@@ -278,6 +323,16 @@ public:
             std::string clkStr = config.conf["devices"][selectedSerial]["clock"];
             if (clocks.keyExists(clkStr)) {
                 clkId = clocks.keyId(clkStr);
+            }
+        }
+
+        // Load ref in
+        if (selectedBladeType == BLADERF_TYPE_V2) {
+            if (config.conf["devices"][selectedSerial].contains("refIn")) {
+                refIn = config.conf["devices"][selectedSerial]["refIn"];
+            }
+            else {
+                refIn = false;
             }
         }
 
@@ -333,18 +388,28 @@ public:
     }
 
 private:
-    std::string getBandwdithScaled(double bw) {
-        char buf[1024];
-        if (bw >= 1000000.0) {
-            sprintf(buf, "%.1lfMHz", bw / 1000000.0);
+    void addSampleRate(int bw) {
+        sampleRates.push_back(bw);
+        sampleRatesTxt += utils::formatFreq(bw);
+        if (getSampleFormat(bw) == BLADERF_FORMAT_SC8_Q7) {
+            sampleRatesTxt += " (8 bit)";
         }
-        else if (bw >= 1000.0) {
-            sprintf(buf, "%.1lfKHz", bw / 1000.0);
+        sampleRatesTxt += '\0';
+    }
+
+    bladerf_format getSampleFormat(double sr) {
+        if (selectedBladeType == BLADERF_TYPE_V2) {
+            if (!selectedSupport8Bitmode) {
+                return BLADERF_FORMAT_SC16_Q11;
+            }
+            
+            if (selectedSupportQ11Packed) {
+                return sr >= 110000001 ? BLADERF_FORMAT_SC8_Q7 : BLADERF_FORMAT_SC16_Q11_PACKED;
+            } else {
+                return sr >= 61400001 ? BLADERF_FORMAT_SC8_Q7 : BLADERF_FORMAT_SC16_Q11;
+            } 
         }
-        else {
-            sprintf(buf, "%.1lfHz", bw);
-        }
-        return std::string(buf);
+        return BLADERF_FORMAT_SC16_Q11;
     }
 
     static void menuSelected(void* ctx) {
@@ -371,21 +436,27 @@ private:
             return;
         }
 
-        // Calculate buffer size, must be a multiple of 1024
+        // Calculate buffer size, must be a multiple of 4096
         _this->bufferSize = _this->sampleRate / 200.0;
-        _this->bufferSize /= 1024;
-        _this->bufferSize *= 1024;
-        if (_this->bufferSize < 1024) { _this->bufferSize = 1024; }
+        _this->bufferSize /= 4096;
+        _this->bufferSize *= 4096;
+        if (_this->bufferSize < 4096) { _this->bufferSize = 4096; }
 
         // Setup device parameters
         _this->setClockSource(_this->clocks[_this->clkId]);
+        if (_this->selectedSupportOversample) {
+            bladerf_enable_feature(_this->openDev, BLADERF_FEATURE_OVERSAMPLE, _this->oversample);
+        }
         bladerf_set_sample_rate(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->sampleRate, NULL);
         bladerf_set_frequency(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->freq);
-        bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
+        if (!_this->oversample) {
+            bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
+        }
         bladerf_set_gain_mode(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->gainModes[_this->gainMode].mode);
 
         if (_this->selectedBladeType == BLADERF_TYPE_V2) {
             bladerf_set_bias_tee(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->biasT);
+            bladerf_set_pll_enable(_this->openDev, _this->refIn);
         }
 
         // If gain mode is manual, set the gain
@@ -396,7 +467,7 @@ private:
         _this->streamingEnabled = true;
 
         // Setup synchronous transfer
-        bladerf_sync_config(_this->openDev, BLADERF_RX_X1, BLADERF_FORMAT_SC16_Q11, 16, _this->bufferSize, 8, 3500);
+        bladerf_sync_config(_this->openDev, BLADERF_RX_X1, _this->getSampleFormat(_this->sampleRate), 16, _this->bufferSize, 8, 3500);
 
         // Enable streaming
         bladerf_enable_module(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), true);
@@ -457,6 +528,7 @@ private:
         if (SmGui::Combo(CONCAT("##_balderf_sr_sel_", _this->name), &_this->srId, _this->sampleRatesTxt.c_str())) {
             _this->sampleRate = _this->sampleRates[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
+            _this->oversample = _this->selectedSupportOversample && _this->sampleRate >= 61400000;
             if (_this->selectedSerial != "") {
                 config.acquire();
                 config.conf["devices"][_this->selectedSerial]["sampleRate"] = _this->sampleRates[_this->srId];
@@ -488,16 +560,18 @@ private:
 
         if (_this->running) { SmGui::EndDisabled(); }
 
-        SmGui::LeftLabel("Bandwidth");
-        SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_balderf_bw_sel_", _this->name), &_this->bwId, _this->bandwidthsTxt.c_str())) {
-            if (_this->running) {
-                bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
-            }
-            if (_this->selectedSerial != "") {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["bandwidth"] = _this->bwId;
-                config.release(true);
+        if (!_this->oversample) {
+            SmGui::LeftLabel("Bandwidth");
+            SmGui::FillWidth();
+            if (SmGui::Combo(CONCAT("##_balderf_bw_sel_", _this->name), &_this->bwId, _this->bandwidthsTxt.c_str())) {
+                if (_this->running) {
+                    bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
+                }
+                if (_this->selectedSerial != "") {
+                    config.acquire();
+                    config.conf["devices"][_this->selectedSerial]["bandwidth"] = _this->bwId;
+                    config.release(true);
+                }
             }
         }
 
@@ -510,6 +584,17 @@ private:
             if (_this->selectedSerial != "") {
                 config.acquire();
                 config.conf["devices"][_this->selectedSerial]["clock"] = _this->clocks.key(_this->clkId);
+                config.release(true);
+            }
+        }
+
+        if (_this->selectedBladeType == BLADERF_TYPE_V2) {
+            if (SmGui::Checkbox("Ref IN", &_this->refIn)) {
+                if (_this->running) {
+                    bladerf_set_pll_enable(_this->openDev, _this->refIn);
+                }
+                config.acquire();
+                config.conf["devices"][_this->selectedSerial]["refIn"] = _this->refIn;
                 config.release(true);
             }
         }
@@ -576,7 +661,9 @@ private:
 
     void worker() {
         int16_t* buffer = new int16_t[bufferSize * 2];
+        
         bladerf_metadata meta;
+        bladerf_format format = getSampleFormat(sampleRate);
 
         while (streamingEnabled) {
             // Receive from the stream and break on error
@@ -584,7 +671,11 @@ private:
             if (ret != 0) { break; }
 
             // Convert to complex float and swap buffers
-            volk_16i_s32f_convert_32f((float*)stream.writeBuf, buffer, 32768.0f, bufferSize * 2);
+            if (format == BLADERF_FORMAT_SC8_Q7) {
+                volk_8i_s32f_convert_32f((float*)stream.writeBuf, (int8_t*)buffer, 128.0f, bufferSize * 2);
+            } else {
+                volk_16i_s32f_convert_32f((float*)stream.writeBuf, buffer, 32768.0f, bufferSize * 2);
+            }
             if (!stream.swap(bufferSize)) { break; }
         }
 
@@ -595,6 +686,7 @@ private:
     bladerf* openDev;
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
+    bool oversample;
     double sampleRate;
     SourceManager::SourceHandler handler;
     bool running = false;
@@ -606,6 +698,7 @@ private:
     int chanId = 0;
     int gainMode = 0;
     bool streamingEnabled = false;
+    bool refIn = false;
     bool biasT = false;
 
     int channelCount;
@@ -635,6 +728,9 @@ private:
     std::string selectedSerial;
 
     BladeRFType selectedBladeType = BLADERF_TYPE_UNKNOWN;
+    bool selectedSupportOversample = false;
+    bool selectedSupport8Bitmode = false;
+    bool selectedSupportQ11Packed = false;
 
     const bladerf_gain_modes* gainModes;
     std::vector<std::string> gainModeNames;
