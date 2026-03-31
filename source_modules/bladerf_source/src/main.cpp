@@ -151,31 +151,6 @@ public:
             selectedBladeType = BLADERF_TYPE_UNKNOWN;
         }
 
-        // Get version info
-        struct bladerf_version libVersion;
-        struct bladerf_version fpgaVersion;
-        struct bladerf_version fwVersion;
-        bladerf_version(&libVersion);
-        bladerf_fpga_version(openDev, &fpgaVersion);
-        bladerf_fw_version(openDev, &fwVersion);
-        flog::info("BladeRFSourceModule libVersion {0}.{1}.{2}", libVersion.major, libVersion.minor, libVersion.patch);
-        flog::info("BladeRFSourceModule fpgaVersion {0}.{1}.{2}", fpgaVersion.major, fpgaVersion.minor, fpgaVersion.patch);
-        flog::info("BladeRFSourceModule fwVersion {0}.{1}.{2}", fwVersion.major, fwVersion.minor, fwVersion.patch);
-        uint64_t libVersionBits = libVersion.major << 16 | libVersion.minor << 8 | libVersion.patch;
-        uint64_t fpgaVersionBits = fpgaVersion.major << 16 | fpgaVersion.minor << 8 | fpgaVersion.patch;
-        uint64_t fwVersionBits = fwVersion.major << 16 | fwVersion.minor << 8 | fwVersion.patch;
-
-        // Gather info about oversample and 8 bitmode support
-        // https://github.com/Nuand/bladeRF/releases/tag/2023.02
-        if (libVersionBits >= 0x020500 && fpgaVersionBits >= 0x000F00 && fwVersionBits >= 0x020400) {
-            selectedSupportOversample = true;
-            selectedSupport8Bitmode = true;
-        }
-        // https://github.com/Nuand/bladeRF/releases/tag/2025.10
-        if (libVersionBits >= 0x020600 && fpgaVersionBits >= 0x001000 && fwVersionBits >= 0x020600) {
-            selectedSupportQ11Packed = true;
-        }
-
         // Gather info about the BladeRF's ranges
         channelCount = bladerf_get_channel_count(openDev, BLADERF_RX);
 
@@ -220,21 +195,13 @@ public:
         addSampleRate(16000000);
         addSampleRate(18000000);
         addSampleRate(20000000);
+        addSampleRate(28000000);
         addSampleRate(30000000);
         addSampleRate(40000000);
         addSampleRate(50000000);
         addSampleRate(56000000);
-        addSampleRate(60000000);
-        addSampleRate(61400000);
-        if (selectedSupportOversample) {
-            addSampleRate(70000000);
-            addSampleRate(80000000);
-            addSampleRate(90000000);
-            addSampleRate(100000000);
-            addSampleRate(110000000);
-            addSampleRate(120000000);
-            addSampleRate(122880000);
-        }
+        addSampleRate(61440000);
+        addSampleRate(122880000);
 
         // Generate bandwidth list
         bandwidths.clear();
@@ -305,7 +272,7 @@ public:
             srId = 0;
             sampleRate = sampleRates[0];
         }
-        oversample = selectedSupportOversample && sampleRate >= 61400000;
+        oversample = sampleRate > 61440000;
 
         // Load bandwidth
         if (config.conf["devices"][selectedSerial].contains("bandwidth")) {
@@ -398,18 +365,7 @@ private:
     }
 
     bladerf_format getSampleFormat(double sr) {
-        if (selectedBladeType == BLADERF_TYPE_V2) {
-            if (!selectedSupport8Bitmode) {
-                return BLADERF_FORMAT_SC16_Q11;
-            }
-            
-            if (selectedSupportQ11Packed) {
-                return sr >= 110000001 ? BLADERF_FORMAT_SC8_Q7 : BLADERF_FORMAT_SC16_Q11_PACKED;
-            } else {
-                return sr >= 61400001 ? BLADERF_FORMAT_SC8_Q7 : BLADERF_FORMAT_SC16_Q11;
-            } 
-        }
-        return BLADERF_FORMAT_SC16_Q11;
+        return sr > 61440000 ? BLADERF_FORMAT_SC8_Q7 : BLADERF_FORMAT_SC16_Q11_PACKED;
     }
 
     static void menuSelected(void* ctx) {
@@ -442,23 +398,30 @@ private:
         _this->bufferSize *= 4096;
         if (_this->bufferSize < 4096) { _this->bufferSize = 4096; }
 
+        // set tuning mode
+        bladerf_set_tuning_mode(_this->openDev, BLADERF_TUNING_MODE_FPGA);
+
+        // set rfic rx fir
+        bladerf_set_rfic_rx_fir(_this->openDev, BLADERF_RFIC_RXFIR_BYPASS);
+        
+
         // Setup device parameters
         _this->setClockSource(_this->clocks[_this->clkId]);
-        if (_this->selectedSupportOversample) {
-            bladerf_enable_feature(_this->openDev, BLADERF_FEATURE_OVERSAMPLE, _this->oversample);
-        }
+        bladerf_enable_feature(_this->openDev, BLADERF_FEATURE_OVERSAMPLE, _this->oversample);
         bladerf_set_sample_rate(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->sampleRate, NULL);
         bladerf_set_frequency(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->freq);
         if (!_this->oversample) {
             bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
         }
-        bladerf_set_gain_mode(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->gainModes[_this->gainMode].mode);
-
+        
+        // set bias tee and PLL
         if (_this->selectedBladeType == BLADERF_TYPE_V2) {
             bladerf_set_bias_tee(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->biasT);
             bladerf_set_pll_enable(_this->openDev, _this->refIn);
         }
 
+        // set gain
+        bladerf_set_gain_mode(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->gainModes[_this->gainMode].mode);
         // If gain mode is manual, set the gain
         if (_this->gainModes[_this->gainMode].mode == BLADERF_GAIN_MANUAL) {
             bladerf_set_gain(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->overallGain);
@@ -528,7 +491,7 @@ private:
         if (SmGui::Combo(CONCAT("##_balderf_sr_sel_", _this->name), &_this->srId, _this->sampleRatesTxt.c_str())) {
             _this->sampleRate = _this->sampleRates[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
-            _this->oversample = _this->selectedSupportOversample && _this->sampleRate >= 61400000;
+            _this->oversample = _this->sampleRate > 61440000;
             if (_this->selectedSerial != "") {
                 config.acquire();
                 config.conf["devices"][_this->selectedSerial]["sampleRate"] = _this->sampleRates[_this->srId];
@@ -728,9 +691,6 @@ private:
     std::string selectedSerial;
 
     BladeRFType selectedBladeType = BLADERF_TYPE_UNKNOWN;
-    bool selectedSupportOversample = false;
-    bool selectedSupport8Bitmode = false;
-    bool selectedSupportQ11Packed = false;
 
     const bladerf_gain_modes* gainModes;
     std::vector<std::string> gainModeNames;
